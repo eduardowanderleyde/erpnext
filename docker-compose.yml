@@ -1,0 +1,121 @@
+services:
+  db:
+    image: mariadb:10.6
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - db-data:/var/lib/mysql
+    restart: unless-stopped
+
+  redis-cache:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  redis-queue:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  redis-socketio:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  configurator:
+    image: ${ERPNEXT_IMAGE}
+    command: ["/bin/bash", "/opt/frappe-configure.sh"]
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - ./scripts/configure.sh:/opt/frappe-configure.sh:ro
+    restart: "no"
+
+  create-site:
+    image: ${ERPNEXT_IMAGE}
+    command: ["/bin/bash", "/opt/frappe-create-site.sh"]
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - ./scripts/create_site.sh:/opt/frappe-create-site.sh:ro
+    depends_on:
+      - db
+      - redis-cache
+      - redis-queue
+      - redis-socketio
+      - configurator
+    restart: "no"
+
+  backend:
+    image: ${ERPNEXT_IMAGE}
+    # Algumas imagens não expõem `gunicorn` no PATH; chamamos via módulo Python.
+    command: ["bash", "-lc", "python3 -m gunicorn --chdir=/home/frappe/frappe-bench/sites --bind=0.0.0.0:8000 --threads=4 --workers=2 frappe.app:application"]
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    depends_on:
+      - db
+      - redis-cache
+      - redis-queue
+      - redis-socketio
+    restart: unless-stopped
+
+  websocket:
+    image: ${ERPNEXT_IMAGE}
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  queue-long:
+    image: ${ERPNEXT_IMAGE}
+    command: bench worker --queue long,default,short
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  scheduler:
+    image: ${ERPNEXT_IMAGE}
+    command: bench schedule
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  frontend:
+    image: ${ERPNEXT_IMAGE}
+    entrypoint: ["nginx-entrypoint.sh"]
+    environment:
+      BACKEND: backend:8000
+      FRAPPE_SITE_NAME_HEADER: ${SITE_NAME}
+      WEBSOCKET: websocket:9000
+      CLIENT_MAX_BODY_SIZE: 50m
+      PROXY_READ_TIMEOUT: 120
+      PROXY_CONNECT_TIMEOUT: 120
+      PROXY_SEND_TIMEOUT: 120
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+    ports:
+      - "8080:8080"
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    depends_on:
+      - backend
+      - websocket
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  sites:
+  logs:
